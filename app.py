@@ -233,12 +233,14 @@ def player_raw(tag):
     clean=tag.strip().replace(' ',''); clean=clean if clean.startswith('#') else '#'+clean
     try:
         p=jfetch(f'{API}/players/{quote(clean,safe="")}')
+        battles=jfetch(f'{API}/players/{quote(clean,safe="")}/battlelog')
     except Exception as e:
         return {'error':'lookup_failed','detail':str(e)}
     return {
         'tag':p.get('tag'),'name':p.get('name'),
         'top_level_fields':sorted(p.keys()),
-        'payload':p
+        'payload':p,
+        'computedStreak':_recent_streak(battles)
     }
 
 def cosmetics(q='',category='all'):
