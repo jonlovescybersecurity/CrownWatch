@@ -1,0 +1,22 @@
+# CrownWatch persistent/local data
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
+# Secrets / local environment
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Editor / OS junk
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
