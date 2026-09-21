@@ -72,7 +72,7 @@ def rows(sql,p=()):
     c=con(); out=[dict(x) for x in c.execute(sql,p).fetchall()]; c.close(); return out
 
 def fetch(url,headers=None):
-    h={'User-Agent':'CrownWatch/1.1'}; h.update(headers or {})
+    h={'User-Agent':'CrownWatch/1.2'}; h.update(headers or {})
     with urlopen(Request(url,headers=h),timeout=20) as r:return r.read().decode('utf-8','replace')
 def jfetch(url): return json.loads(fetch(url,{'Authorization':f'Bearer {TOKEN}','Accept':'application/json'}))
 
@@ -228,6 +228,36 @@ def _recent_streak(battles):
             break
     return {'type':streak_type or 'none','count':count}
 
+def _recent_battle_rows(battles):
+    out=[]
+    for b in battles[:12] if isinstance(battles,list) else []:
+        team=b.get('team') or []
+        opp=b.get('opponent') or []
+        if not team:
+            continue
+        me=team[0]
+        foe=opp[0] if opp else {}
+        a=me.get('crowns',0)
+        z=foe.get('crowns',0)
+        out.append({
+            'battleTime':b.get('battleTime'),
+            'type':b.get('type'),
+            'gameMode':(b.get('gameMode') or {}).get('name'),
+            'result':'win' if a>z else 'loss' if a<z else 'draw',
+            'crowns':a,
+            'opponentCrowns':z,
+            'opponent':foe.get('name','Unknown'),
+            'opponentTag':foe.get('tag'),
+            'cards':[{
+                'id':x.get('id'),
+                'name':x.get('name'),
+                'level':x.get('level'),
+                'rarity':x.get('rarity'),
+                'icon':(x.get('iconUrls') or {}).get('medium')
+            } for x in (me.get('cards') or [])]
+        })
+    return out
+
 def player_raw(tag):
     if not TOKEN:return {'error':'api_not_configured'}
     clean=tag.strip().replace(' ',''); clean=clean if clean.startswith('#') else '#'+clean
@@ -240,7 +270,8 @@ def player_raw(tag):
         'tag':p.get('tag'),'name':p.get('name'),
         'top_level_fields':sorted(p.keys()),
         'payload':p,
-        'computedStreak':_recent_streak(battles)
+        'computedStreak':_recent_streak(battles),
+        'recentBattles':_recent_battle_rows(battles)
     }
 
 def cosmetics(q='',category='all'):
@@ -357,6 +388,6 @@ class H(SimpleHTTPRequestHandler):
         return super().do_GET()
 
 if __name__=='__main__':
-    init(); threading.Thread(target=loop,daemon=True).start(); print(f'CrownWatch V1.1 -> http://127.0.0.1:{PORT}')
+    init(); threading.Thread(target=loop,daemon=True).start(); print(f'CrownWatch V1.2 -> http://127.0.0.1:{PORT}')
     try:ThreadingHTTPServer(('127.0.0.1',PORT),H).serve_forever()
     except KeyboardInterrupt:print('\nCrownWatch shutting down cleanly.')
