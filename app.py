@@ -55,6 +55,26 @@ def init():
       url TEXT NOT NULL UNIQUE,
       discovered_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS player_snapshots(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      player_tag TEXT NOT NULL,
+      observed_at TEXT NOT NULL,
+      trophies INTEGER,
+      best_trophies INTEGER,
+      wins INTEGER,
+      losses INTEGER,
+      battle_count INTEGER,
+      three_crown_wins INTEGER,
+      collection_level INTEGER,
+      total_donations INTEGER,
+      emote_progress INTEGER,
+      banner_progress INTEGER,
+      mastery_json TEXT NOT NULL,
+      deck_key TEXT,
+      snapshot_hash TEXT NOT NULL,
+      UNIQUE(player_tag,snapshot_hash)
+    );
+    CREATE INDEX IF NOT EXISTS idx_player_snapshots_tag_time ON player_snapshots(player_tag,observed_at DESC);
     ''')
     seed=[
     ('Hero Ice Wizard','nerf','Freeze Duration','7 sec','5 sec',-29,'2026-09-16'),('Goblinstein','nerf','Ability Duration','4 sec','3.5 sec',-13,'2026-09-16'),('Minion Giant','nerf','Damage','189','168',-11,'2026-09-16'),('Fire Spirit','buff','Damage','207','215',4,'2026-09-16')]
@@ -72,7 +92,7 @@ def rows(sql,p=()):
     c=con(); out=[dict(x) for x in c.execute(sql,p).fetchall()]; c.close(); return out
 
 def fetch(url,headers=None):
-    h={'User-Agent':'CrownWatch/1.2'}; h.update(headers or {})
+    h={'User-Agent':'CrownWatch/1.3'}; h.update(headers or {})
     with urlopen(Request(url,headers=h),timeout=20) as r:return r.read().decode('utf-8','replace')
 def jfetch(url): return json.loads(fetch(url,{'Authorization':f'Bearer {TOKEN}','Accept':'application/json'}))
 
@@ -258,6 +278,89 @@ def _recent_battle_rows(battles):
         })
     return out
 
+def _badge_progress(p,name):
+    for b in p.get('badges',[]) or []:
+        if b.get('name')==name:
+            return b.get('progress')
+    return None
+
+def _mastery_levels(p):
+    out={}
+    for b in p.get('badges',[]) or []:
+        name=b.get('name') or ''
+        if name.startswith('Mastery'):
+            out[name]=b.get('level') or 0
+    return out
+
+def _deck_key_from_player(p):
+    cards=p.get('currentDeck') or []
+    return '-'.join(sorted(str(x.get('id','')) for x in cards if x.get('id')))
+
+def _profile_snapshot_record(p):
+    rec={
+        'player_tag':p.get('tag'),
+        'observed_at':now(),
+        'trophies':p.get('trophies'),
+        'best_trophies':p.get('bestTrophies'),
+        'wins':p.get('wins'),
+        'losses':p.get('losses'),
+        'battle_count':p.get('battleCount'),
+        'three_crown_wins':p.get('threeCrownWins'),
+        'collection_level':p.get('collectionLevel'),
+        'total_donations':p.get('totalDonations'),
+        'emote_progress':_badge_progress(p,'EmoteCollection'),
+        'banner_progress':_badge_progress(p,'BannerCollection'),
+        'mastery':_mastery_levels(p),
+        'deck_key':_deck_key_from_player(p)
+    }
+    stable={k:v for k,v in rec.items() if k!='observed_at'}
+    rec['snapshot_hash']=hashlib.sha1(json.dumps(stable,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    return rec
+
+def _snapshot_delta(cur,prev):
+    fields=['trophies','best_trophies','wins','losses','battle_count','three_crown_wins','collection_level','total_donations','emote_progress','banner_progress']
+    delta={}
+    for k in fields:
+        a=cur.get(k); b=prev.get(k) if prev else None
+        delta[k]=(a-b) if isinstance(a,(int,float)) and isinstance(b,(int,float)) else None
+    mastery_changes=[]
+    oldm={}
+    if prev:
+        try: oldm=json.loads(prev.get('mastery_json') or '{}')
+        except: oldm={}
+    for name,level in cur.get('mastery',{}).items():
+        old=oldm.get(name)
+        if old is not None and level!=old:
+            mastery_changes.append({'name':name,'from':old,'to':level,'delta':level-old})
+    delta['mastery_changes']=sorted(mastery_changes,key=lambda x:(-abs(x['delta']),x['name']))[:12]
+    delta['deck_changed']=bool(prev and cur.get('deck_key')!=prev.get('deck_key'))
+    return delta
+
+def save_player_snapshot(p):
+    cur=_profile_snapshot_record(p)
+    prev_rows=rows('SELECT * FROM player_snapshots WHERE player_tag=? ORDER BY observed_at DESC,id DESC LIMIT 1',(cur['player_tag'],))
+    prev=prev_rows[0] if prev_rows else None
+    delta=_snapshot_delta(cur,prev)
+    c=con()
+    c.execute('''INSERT OR IGNORE INTO player_snapshots(
+        player_tag,observed_at,trophies,best_trophies,wins,losses,battle_count,three_crown_wins,
+        collection_level,total_donations,emote_progress,banner_progress,mastery_json,deck_key,snapshot_hash
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(
+        cur['player_tag'],cur['observed_at'],cur['trophies'],cur['best_trophies'],cur['wins'],cur['losses'],
+        cur['battle_count'],cur['three_crown_wins'],cur['collection_level'],cur['total_donations'],
+        cur['emote_progress'],cur['banner_progress'],json.dumps(cur['mastery'],separators=(',',':')),
+        cur['deck_key'],cur['snapshot_hash']))
+    c.commit(); c.close()
+    history=rows('''SELECT observed_at,trophies,best_trophies,wins,losses,battle_count,three_crown_wins,
+                    collection_level,total_donations,emote_progress,banner_progress,deck_key
+                    FROM player_snapshots WHERE player_tag=? ORDER BY observed_at DESC,id DESC LIMIT 30''',(cur['player_tag'],))
+    return {
+        'delta':delta,
+        'previous_at':prev.get('observed_at') if prev else None,
+        'snapshot_count':len(rows('SELECT id FROM player_snapshots WHERE player_tag=?',(cur['player_tag'],))),
+        'history':history
+    }
+
 def player_raw(tag):
     if not TOKEN:return {'error':'api_not_configured'}
     clean=tag.strip().replace(' ',''); clean=clean if clean.startswith('#') else '#'+clean
@@ -271,7 +374,8 @@ def player_raw(tag):
         'top_level_fields':sorted(p.keys()),
         'payload':p,
         'computedStreak':_recent_streak(battles),
-        'recentBattles':_recent_battle_rows(battles)
+        'recentBattles':_recent_battle_rows(battles),
+        'progressTracking':save_player_snapshot(p)
     }
 
 def cosmetics(q='',category='all'):
@@ -388,6 +492,6 @@ class H(SimpleHTTPRequestHandler):
         return super().do_GET()
 
 if __name__=='__main__':
-    init(); threading.Thread(target=loop,daemon=True).start(); print(f'CrownWatch V1.2 -> http://127.0.0.1:{PORT}')
+    init(); threading.Thread(target=loop,daemon=True).start(); print(f'CrownWatch V1.3 -> http://127.0.0.1:{PORT}')
     try:ThreadingHTTPServer(('127.0.0.1',PORT),H).serve_forever()
     except KeyboardInterrupt:print('\nCrownWatch shutting down cleanly.')
